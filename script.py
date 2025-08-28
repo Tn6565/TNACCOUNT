@@ -34,19 +34,36 @@ def get_usernames(user_ids):
     users_data = response.json().get("data", [])
     return {u["id"]: f"@{u['username']}" for u in users_data}
 
-# Streamlit UI
-st.title("NGワードから@ユーザーID抽出")
+# --- UIデザイン強化 ---
+st.set_page_config(page_title="NGワード抽出ツール", page_icon="🔍", layout="centered")
 
-ng_word = st.text_input("NGワードを入力（複数可、スペース区切り）")
-if st.button("検索実行"):
-    data, error = get_tweets(ng_word)
-    if error:
-        st.error(error)
-    elif data and "data" in data:
-        user_ids = list({tweet["author_id"] for tweet in data["data"]})
-        username_map = get_usernames(user_ids)
-        usernames = [username_map.get(uid, f"(不明ID: {uid})") for uid in user_ids]
-        st.success("抽出されたユーザー:")
-        st.write("\n".join(usernames))
-    else:
-        st.warning("該当するツイートはありませんでした。")
+st.title("🔍 NGワードからユーザー抽出")
+st.markdown("特定のNGワードを含む投稿から **@ユーザーID** を抽出します。")
+
+# 入力エリア
+ng_word = st.text_input("NGワード（複数可、スペース区切り）", placeholder="例: spam scam bot")
+
+max_results = st.slider("取得件数", min_value=10, max_value=100, value=30, step=10)
+
+if st.button("検索開始 🚀"):
+    with st.spinner("検索中..."):
+        data, error = get_tweets(ng_word, max_results=max_results)
+        if error:
+            st.error(error)
+        elif data and "data" in data:
+            user_ids = list({tweet["author_id"] for tweet in data["data"]})
+            username_map = get_usernames(user_ids)
+            usernames = [username_map.get(uid, f"(不明ID: {uid})") for uid in user_ids]
+
+            st.success(f"抽出されたユーザー: {len(usernames)} 件")
+            st.write("\n".join(usernames))
+
+            st.download_button(
+                label="📥 ユーザー一覧をダウンロード",
+                data="\n".join(usernames),
+                file_name="ng_users.txt",
+                mime="text/plain"
+            )
+        else:
+            st.warning("該当するツイートはありませんでした。")
+
