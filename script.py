@@ -22,6 +22,13 @@ from dotenv import load_dotenv
 # CONFIG
 # -------------------------
 st.set_page_config(page_title="NGワード監視ツール 3.0", layout="wide", page_icon="🔎")
+st.markdown(
+    """
+    <link rel="TNSS_ICON" sizes="180x180" href="/TNSS_ICON.png">
+    """,
+    unsafe_allow_html=True
+)
+
 load_dotenv()
 BEARER = os.getenv("EXTNSS_BEARER_TOKEN")  # required
 
