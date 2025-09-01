@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 # -------------------------
 # CONFIG
 # -------------------------
-st.set_page_config(page_title="NGワード監視ツール 3.0", layout="wide", page_icon="🔎")
+st.set_page_config(page_title="NGワード監視ツール 3.0", layout="wide", page_icon="public/TNSS_ICON.png")
 st.markdown(
     """
     <link rel="TNSS_ICON" sizes="180x180" href="/TNSS_ICON.png">
