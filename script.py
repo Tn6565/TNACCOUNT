@@ -2,12 +2,11 @@
 """
 NGワード抽出ツール 3.0 (Streamlit)
 - 高度検索ビルダー、フィルタ、エクスポート、定期監視、履歴、ダッシュボード
-- Save as app.py. Requires .env with API1=<X/Twitter Bearer Token>
+- Save as app.py. Requires .env with TNSS_BEARER_TOKEN=<X/Twitter Bearer Token>
 """
 import os
 import time
 import json
-import csv
 import io
 import threading
 import sqlite3
@@ -24,7 +23,7 @@ from dotenv import load_dotenv
 # -------------------------
 st.set_page_config(page_title="NGワード監視ツール 3.0", layout="wide", page_icon="🔎")
 load_dotenv()
-BEARER = os.getenv("TNSS_BEARER_TOKEN")  # required
+BEARER = os.getenv("EXTNSS_BEARER_TOKEN")  # required
 
 SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent"
 USERS_URL = "https://api.twitter.com/2/users"
@@ -262,4 +261,169 @@ def stop_scheduler():
 # Streamlit UI (Main)
 # -------------------------
 st.title("🔎 NGワード監視ツール 3.0 — 完成版目標")
-st.markdown("")
+st.markdown("高度検索 / 保存・履歴 / エクスポート / 定期監視 を備えた完成度の高いツールです。")
+
+left, right = st.columns([2,3])
+
+with left:
+    st.header("検索ビルダー")
+    raw_input = st.text_area("NGワード（スペース / カンマ / 改行で区切り）", placeholder="例: 暴言, 詐欺", height=100)
+    max_results = st.slider("取得件数", 10, 100, 30, step=10)
+    min_followers = st.number_input("最小フォロワー数（0=無制限）", min_value=0, value=0)
+    require_no_posts = st.checkbox("投稿ゼロのみ (tweet_count == 0)")
+    require_default_icon = st.checkbox("アイコン未設定のみ")
+    min_tweet_count = st.number_input("最小ツイート数（0=無制限）", min_value=0, value=0)
+    min_following = st.number_input("最小フォロー数（0=無制限）", min_value=0, value=0)
+    verified_only = st.checkbox("認証済みユーザーのみ", value=False)
+    run_query = st.button("🔍 検索実行（即時）")
+
+with right:
+    st.header("操作 / 実行")
+    interval = st.number_input("監視間隔（分）", min_value=1, value=15)
+    start_mon = st.button("監視開始 ▶")
+    stop_mon = st.button("監視停止 ⏹")
+    if start_mon:
+        words = normalize_words(raw_input)
+        filters = {"require_no_posts": require_no_posts, "min_followers": min_followers, "min_following": min_following}
+        start_scheduler(interval, words, max_results, filters)
+        st.success("監視を開始しました。")
+    if stop_mon:
+        stop_scheduler()
+        st.success("監視を停止しました。")
+
+    st.markdown("---")
+    st.header("エクスポート / 管理")
+    st.markdown("検索結果はCSV / Excel / JSONでエクスポート可能。履歴やプリセットを管理できます。")
+
+def build_query(raw_input: str) -> Tuple[str, dict]:
+    words = normalize_words(raw_input)
+    if not words:
+        return "", {}
+    query = " OR ".join([quote_if_space(w) for w in words])
+    params = {"query": f"{query} -is:retweet", "max_results": max(10, min(max_results, 100)),
+              "tweet.fields": "author_id,created_at,text"}
+    return query, params
+
+if run_query:
+    if is_in_cooldown():
+        st.error("APIのレート制限により現在一時的に実行できません。しばらく待ってください。")
+    else:
+        query, params = build_query(raw_input)
+        if not query:
+            st.warning("NGワードを入力してください。")
+        else:
+            with st.spinner("検索中..."):
+                resp = call_search_api(params)
+            if resp.get("error"):
+                st.error(f"検索エラー: {resp['error']}")
+            else:
+                data = resp.get("data", [])
+                db_insert_history(query, len(data))
+                if not data:
+                    st.info("該当するツイートはありませんでした。")
+                else:
+                    user_ids = list({t["author_id"] for t in data})
+                    uresp = call_users_api(user_ids)
+                    if uresp.get("error"):
+                        st.error(f"ユーザー情報取得エラー: {uresp['error']}")
+                    else:
+                        users = uresp.get("data", [])
+                        id_map = {u["id"]: u for u in users}
+                        rows = []
+                        for t in data:
+                            uid = t["author_id"]
+                            u = id_map.get(uid, {})
+                            pm = u.get("public_metrics", {})
+                            rows.append({
+                                "username": "@" + u.get("username", "") if u.get("username") else f"(不明ID:{uid})",
+                                "name": u.get("name",""),
+                                "user_id": uid,
+                                "text": t.get("text","")[:240],
+                                "created_at": t.get("created_at",""),
+                                "followers": pm.get("followers_count"),
+                                "tweet_count": pm.get("tweet_count"),
+                                "following": pm.get("following_count"),
+                                "verified": u.get("verified", False),
+                                "icon": u.get("profile_image_url","")
+                            })
+                        df = pd.DataFrame(rows).drop_duplicates(subset=["user_id"])
+                        def apply_filters(df):
+                            df2 = df
+                            if require_no_posts:
+                                df2 = df2[df2["tweet_count"] == 0]
+                            if require_default_icon:
+                                df2 = df2[df2["icon"].isnull() | df2["icon"].str.contains("default_profile", na=False) | df2["icon"].str.contains("default_profile_images", na=False)]
+                            if min_followers and min_followers > 0:
+                                df2 = df2[df2["followers"].fillna(0) >= min_followers]
+                            if min_following and min_following > 0:
+                                df2 = df2[df2["following"].fillna(0) >= min_following]
+                            if verified_only:
+                                df2 = df2[df2["verified"] == True]
+                            if min_tweet_count and min_tweet_count > 0:
+                                df2 = df2[df2["tweet_count"].fillna(0) >= min_tweet_count]
+                            return df2
+
+                        df_filtered = apply_filters(df)
+                        st.success(f"抽出結果: {len(df_filtered)} 件（全体ヒット {len(df)} 件）")
+                        for idx, r in df_filtered.iterrows():
+                            cols = st.columns([1,6,1])
+                            with cols[0]:
+                                if r["icon"]:
+                                    st.image(r["icon"], width=48)
+                            with cols[1]:
+                                st.markdown(f"**{r['username']}**  {r['name']}  \n{r['text']}")
+                                st.caption(f"followers: {r['followers']} / following: {r['following']} / tweets: {r['tweet_count']} / verified: {r['verified']}")
+                            with cols[2]:
+                                st.write("")
+                                if st.button(f"コピー {r['user_id']}", key=f"copy_{r['user_id']}"):
+                                    st.experimental_set_query_params()
+                                    st.toast("ユーザー名をコピーしました（手動で貼り付け可能）")
+                        csv_bytes = df_filtered.to_csv(index=False).encode("utf-8-sig")
+                        excel_buf = io.BytesIO()
+                        with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+                            df_filtered.to_excel(writer, index=False, sheet_name="results")
+                        excel_bytes = excel_buf.getvalue()
+                        json_bytes = df_filtered.to_json(orient="records", force_ascii=False).encode("utf-8")
+                        cole1, cole2, cole3 = st.columns(3)
+                        with cole1:
+                            st.download_button("CSVダウンロード", data=csv_bytes, file_name="ng_users.csv", mime="text/csv")
+                        with cole2:
+                            st.download_button("Excelダウンロード", data=excel_bytes, file_name="ng_users.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        with cole3:
+                            st.download_button("JSONダウンロード", data=json_bytes, file_name="ng_users.json", mime="application/json")
+
+st.sidebar.header("ダッシュボード")
+hist = db_get_history(10)
+st.sidebar.markdown("### 最近の検索履歴")
+if hist:
+    for q, ts, cnt in hist:
+        st.sidebar.write(f"- {q} ({ts.split('T')[0]}) [{cnt}]")
+else:
+    st.sidebar.write("履歴なし")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### リスト管理（NG / White / Watch）")
+lists = db_get_lists()
+if lists:
+    for l in lists:
+        if len(l) == 4:
+            st.sidebar.write(f"- ({l[2]}) {l[1]} : {l[3][:40]}...")
+        elif len(l) == 3:
+            st.sidebar.write(f"- {l[1]} : {l[2][:40]}...")
+else:
+    st.sidebar.write("リストはまだありません")
+if st.sidebar.button("リストを追加（テスト）"):
+    db_add_list("sample_ng", "ng", "spam scam")
+    st.sidebar.success("追加しました")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ログ（最新）")
+logs = db_get_logs(10)
+if logs:
+    for level, msg, ts in logs:
+        st.sidebar.write(f"[{ts.split('T')[0]}] {level}: {msg[:80]}")
+else:
+    st.sidebar.write("ログなし")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("完成版3.0はさらに OAuth/課金")
